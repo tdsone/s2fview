@@ -14,7 +14,9 @@ files; git history keeps the previous versions.
 | `03_multi_exon.png`     | cell 3 | Single multi-exon gene with introns, chevrons, arrow tip |
 | `04_overlapping_lanes.png` | cell 4 | Overlapping genes auto-stacked into lanes |
 | `05_messy_mixed.png`    | cell 5 | Kitchen sink: overlapping + multi-exon + tiny + both strands |
-| `06_interactive_static_fallback.png` | cell 7 | Static fallback of the `interactive_coverage_track` widget |
+
+The interactive viewer lives in `notebook_interactive.ipynb` and renders as a
+live widget — no static snapshot is captured here.
 
 To regenerate after a code change:
 

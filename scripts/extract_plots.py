@@ -20,7 +20,6 @@ NAMES: list[str] = [
     "03_multi_exon.png",
     "04_overlapping_lanes.png",
     "05_messy_mixed.png",
-    "06_interactive_static_fallback.png",
 ]
 
 
