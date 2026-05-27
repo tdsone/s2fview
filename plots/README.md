@@ -18,6 +18,18 @@ files; git history keeps the previous versions.
 The interactive viewer lives in `notebook_interactive.ipynb` and renders as a
 live widget — no static snapshot is captured here.
 
+## GenomeView snapshots (`notebook_genomeview.ipynb`)
+
+Saved by `genomeview.save(...)` calls inline in that notebook. SVG (vector)
+is GenomeView's native output; rasterize with `rsvg-convert` /  `inkscape`
+if you need a PNG.
+
+| File | What it shows |
+|------|---------------|
+| `genomeview_01_basic.svg`        | Coverage + gene track (counterpart to `02_simple_genes.png`) |
+| `genomeview_02_stranded.svg`     | Stranded coverage via `GraphTrack.add_series` (forward blue, reverse red) |
+| `genomeview_03_multi_region.svg` | Two non-contiguous regions in one document |
+
 To regenerate after a code change:
 
 ```bash
