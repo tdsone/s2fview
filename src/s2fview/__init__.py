@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import font_manager
 from matplotlib.axes import Axes
+from matplotlib.collections import PolyCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import Polygon
 from matplotlib.widgets import SpanSelector
@@ -345,6 +346,14 @@ def add_gene_track(
     # reads as consistent across the figure, regardless of gene length.
     xmin, xmax = gene_ax.get_xlim()
     arrow_w_base = max(1.0, (xmax - xmin) * 0.012)
+    chev_half_w = max(0.5, (xmax - xmin) * 0.005)
+    chev_half_h = 0.12
+
+    # Collect chevron triangles for ALL genes into a single PolyCollection;
+    # one draw call is dramatically faster than rendering each chevron as a
+    # text glyph (text path rasterization is ~the dominant cost per redraw).
+    chev_verts: list[list[tuple[float, float]]] = []
+    chev_colors: list[str] = []
 
     box_h = 0.55
     for gene, lane in zip(genes, lanes):
@@ -362,24 +371,28 @@ def add_gene_track(
             zorder=1,
         )
 
-        # Strand chevrons along the intron line; boxes will cover the ones
-        # that fall inside exons, so visually they only show in introns.
+        # Strand chevrons along the intron line; gene exon boxes (zorder=2)
+        # cover the ones that fall inside exons, so visually they only show
+        # in introns.
         if arrow:
             span = gene.end - gene.start
             n_chev = max(1, int(span / 35))
-            glyph = "›" if gene.strand == "+" else "‹"
             for k in range(n_chev):
                 cx = gene.start + (k + 0.5) * span / n_chev
-                gene_ax.text(
-                    cx,
-                    center_y,
-                    glyph,
-                    ha="center",
-                    va="center",
-                    color=gene_color,
-                    fontsize=fontsize,
-                    zorder=1,
-                )
+                if gene.strand == "+":
+                    tri = [
+                        (cx - chev_half_w, center_y - chev_half_h),
+                        (cx + chev_half_w, center_y),
+                        (cx - chev_half_w, center_y + chev_half_h),
+                    ]
+                else:
+                    tri = [
+                        (cx + chev_half_w, center_y - chev_half_h),
+                        (cx - chev_half_w, center_y),
+                        (cx + chev_half_w, center_y + chev_half_h),
+                    ]
+                chev_verts.append(tri)
+                chev_colors.append(gene_color)
 
         # Exon shapes: terminal exon (in transcription direction) gets a
         # pointy arrow tip; the rest are plain rectangles.
@@ -412,6 +425,16 @@ def add_gene_track(
                 zorder=3,
                 clip_on=False,
             )
+
+    if chev_verts:
+        gene_ax.add_collection(
+            PolyCollection(
+                chev_verts,
+                facecolors=chev_colors,
+                edgecolors="none",
+                zorder=1,
+            )
+        )
 
 
 def interactive_coverage_track(
@@ -519,7 +542,7 @@ def interactive_coverage_track(
     import time
 
     _last_move = {"t": 0.0, "x": None}
-    _move_period = 1.0 / 30.0
+    _move_period = 1.0 / 60.0
 
     def _on_move(event):
         now = time.monotonic()
