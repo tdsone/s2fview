@@ -1,0 +1,19 @@
+[project]
+name = "s2fview"
+version = "0.1.0"
+description = "like igv in jupyter notebooks but better"
+authors = [
+    { name = "Timon Schneider", email = "mail@timonschneider.de" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "igv-notebook>=0.6.2",
+    "ipykernel>=7.2.0",
+    "ipympl>=0.9.4",
+    "matplotlib>=3.10.9",
+    "numpy>=2.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.16,<0.10.0"]
+build-backend = "uv_build"

@@ -1,0 +1,10 @@
+- gene annotations
+- sequence
+- logos (e.g. dynamic height of sequence)
+- coverage tracks
+    - single 
+    - forward / reverse
+    - mutiple in overlay
+- zoom into plot
+- hover over plot and get vertical line as "cursor"
+- should allow dataloading from typical genomic files (i.e. bed/fasta/etc) as well as python natvie data formats such as numpy arrays or torch/jax/tensorflow tensors
