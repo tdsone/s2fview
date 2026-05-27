@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import matplotlib as mpl
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.patches import Polygon
@@ -22,6 +24,17 @@ mpl.rcParams["font.sans-serif"] = [
     "Helvetica",
     *mpl.rcParams["font.sans-serif"],
 ]
+
+
+# IGV-ish palette for DNA bases. Saturated enough to be unambiguous, soft
+# enough that white letters on top read cleanly.
+SEQUENCE_COLORS: dict[str, str] = {
+    "A": "#3aa55a",  # green
+    "C": "#3585c7",  # blue
+    "G": "#e8a43c",  # orange
+    "T": "#d65a4a",  # red
+    "N": "#a8a8a8",  # gray fallback
+}
 
 
 @dataclass(frozen=True)
@@ -51,6 +64,7 @@ def coverage_track(
     positions: Sequence[int] | None = None,
     *,
     genes: Sequence[Gene] | None = None,
+    sequence: str | None = None,
     color: str = "#3b7dd8",
     forward_color: str = "#2563eb",
     reverse_color: str = "#dc2626",
@@ -62,13 +76,18 @@ def coverage_track(
     dpi: int = 200,
     guide_color: str = "#9a9a9a",
 ) -> tuple[Figure, Axes]:
-    """Plot a coverage track, optionally with a gene track below the x-axis.
+    """Plot a coverage track, optionally with a DNA sequence and a gene track.
 
-    When ``genes`` is provided, the figure has two stacked, x-shared axes:
-    the coverage on top (keeping its tick labels), and a dedicated gene-
-    annotation strip beneath. Overlapping genes are automatically stacked
-    onto multiple lanes; the gene strip grows to fit. Returns
-    ``(fig, coverage_axes)``; the gene axes (if any) is ``fig.axes[1]``.
+    When ``sequence`` and/or ``genes`` are provided, the figure becomes a
+    stack of x-shared axes:
+
+    * Coverage (top, with tick labels)
+    * DNA sequence strip (colored cells per base; letters appear only when
+      there's enough pixel room — they re-render lazily on zoom)
+    * Gene annotation track (auto-stacked into lanes for overlapping genes)
+
+    Returns ``(fig, coverage_axes)``; additional axes are available via
+    ``fig.axes``.
     """
     if positions is None:
         positions = list(range(len(values)))
@@ -77,34 +96,60 @@ def coverage_track(
             f"positions and values must have the same length "
             f"(got {len(positions)} and {len(values)})"
         )
+    if sequence is not None and len(sequence) != len(values):
+        raise ValueError(
+            f"sequence length must match values length "
+            f"(got {len(sequence)} and {len(values)})"
+        )
 
-    if genes:
+    has_sequence = sequence is not None
+    has_genes = bool(genes)
+
+    sizes_inches: list[float] = [figsize[1]]
+    if has_sequence:
+        sizes_inches.append(0.30)
+    lanes: list[int] | None = None
+    if has_genes:
+        assert genes is not None
         lanes = _assign_lanes(genes)
         n_lanes = max(lanes) + 1
-        gene_track_inches = max(0.5, 0.4 * n_lanes)
-        gap_inches = 0.55
-        avg_axes_h = (figsize[1] + gene_track_inches) / 2
-        fig, (ax, gene_ax) = plt.subplots(
-            2,
-            1,
-            figsize=(figsize[0], figsize[1] + gap_inches + gene_track_inches),
-            dpi=dpi,
-            gridspec_kw={
-                "height_ratios": [figsize[1], gene_track_inches],
-                "hspace": gap_inches / avg_axes_h,
-            },
-            sharex=True,
-        )
-        ax.tick_params(labelbottom=True)
-    else:
+        sizes_inches.append(max(0.5, 0.4 * n_lanes))
+
+    gene_ax: Axes | None = None
+    seq_ax: Axes | None = None
+
+    if len(sizes_inches) == 1:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-        gene_ax = None
-        lanes = None
+    else:
+        gap_inches = 0.45
+        n_rows = len(sizes_inches)
+        avg_axes_h = sum(sizes_inches) / n_rows
+        fig = plt.figure(
+            figsize=(figsize[0], sum(sizes_inches) + (n_rows - 1) * gap_inches),
+            dpi=dpi,
+        )
+        gs = fig.add_gridspec(
+            n_rows,
+            1,
+            height_ratios=sizes_inches,
+            hspace=gap_inches / avg_axes_h,
+        )
+        ax = fig.add_subplot(gs[0])
+        idx = 1
+        if has_sequence:
+            seq_ax = fig.add_subplot(gs[idx], sharex=ax)
+            idx += 1
+        if has_genes:
+            gene_ax = fig.add_subplot(gs[idx], sharex=ax)
+        ax.tick_params(labelbottom=True)
 
     ax.fill_between(positions, values, step="mid", color=color, alpha=0.85, label=label)
     ax.plot(positions, values, drawstyle="steps-mid", color=color, linewidth=0.8)
 
-    ax.set_xlim(positions[0], positions[-1])
+    # When a sequence is shown, widen xlim to match the cell extents so the
+    # first/last bases aren't clipped in half.
+    xlim_pad = 0.5 if has_sequence else 0
+    ax.set_xlim(positions[0] - xlim_pad, positions[-1] + xlim_pad)
     ax.set_ylim(bottom=0)
     ax.margins(x=0)
     if xlabel:
@@ -118,8 +163,12 @@ def coverage_track(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
+    if seq_ax is not None:
+        assert sequence is not None
+        add_sequence_track(seq_ax, sequence, start=int(positions[0]))
+
     if gene_ax is not None:
-        assert genes is not None  # invariant: gene_ax exists only when genes were given
+        assert genes is not None
         add_gene_track(
             gene_ax,
             genes,
@@ -130,24 +179,116 @@ def coverage_track(
         gene_ax.set_xlabel("")
         boundary_xs = sorted({x for g in genes for x in (g.start, g.end)})
         for x in boundary_xs:
-            ax.axvline(
-                x,
-                linestyle=(0, (1, 2)),
-                color=guide_color,
-                linewidth=0.7,
-                alpha=0.8,
-                zorder=0,
-            )
-            gene_ax.axvline(
-                x,
-                linestyle=(0, (1, 2)),
-                color=guide_color,
-                linewidth=0.7,
-                alpha=0.8,
-                zorder=0,
-            )
+            for guide_ax in (ax, gene_ax):
+                guide_ax.axvline(
+                    x,
+                    linestyle=(0, (1, 2)),
+                    color=guide_color,
+                    linewidth=0.7,
+                    alpha=0.8,
+                    zorder=0,
+                )
 
     return fig, ax
+
+
+def add_sequence_track(
+    seq_ax: Axes,
+    sequence: str,
+    start: int = 0,
+    *,
+    fontsize: float = 7.0,
+    letter_color: str = "white",
+) -> None:
+    """Render a DNA sequence as a one-row colored strip on ``seq_ax``.
+
+    The colored cells (one per base) are drawn as a single ``imshow`` so the
+    cost is independent of sequence length. Individual base letters render
+    on top *lazily* — they only appear when there's enough horizontal pixel
+    room per base, and they're re-rendered for the visible window whenever
+    the axes' xlim changes (e.g. on zoom).
+
+    ``start`` is the genomic position of ``sequence[0]``.
+    """
+    n = len(sequence)
+    rgb = _sequence_to_rgb_array(sequence)
+
+    seq_ax.imshow(
+        rgb,
+        aspect="auto",
+        extent=(start - 0.5, start + n - 0.5, 0, 1),
+        interpolation="nearest",
+        zorder=1,
+    )
+    seq_ax.set_ylim(0, 1)
+    seq_ax.set_yticks([])
+    seq_ax.tick_params(
+        axis="x", which="both", length=0, labelbottom=False, labeltop=False
+    )
+    for spine in seq_ax.spines.values():
+        spine.set_visible(False)
+
+    # Match xlim to the sequence range if nothing has set it yet.
+    if seq_ax.get_xlim() == (0.0, 1.0):
+        seq_ax.set_xlim(start - 0.5, start + n - 0.5)
+
+    letter_texts: list = []
+    state = {"first_drawn": False}
+
+    def _redraw_letters(*_):
+        for txt in letter_texts:
+            txt.remove()
+        letter_texts.clear()
+
+        bbox = seq_ax.get_window_extent()
+        if bbox.width <= 0:
+            return
+
+        x0, x1 = seq_ax.get_xlim()
+        pixels_per_base = bbox.width / max(1e-9, x1 - x0)
+        # Need roughly the letter width plus a bit of padding.
+        if pixels_per_base < fontsize * 1.2:
+            return
+
+        i_min = max(0, int(np.floor(x0 - start)))
+        i_max = min(n, int(np.ceil(x1 - start)) + 1)
+
+        for i in range(i_min, i_max):
+            txt = seq_ax.text(
+                start + i,
+                0.5,
+                sequence[i].upper(),
+                ha="center",
+                va="center",
+                color=letter_color,
+                fontsize=fontsize,
+                fontweight="bold",
+                zorder=2,
+                clip_on=True,
+            )
+            letter_texts.append(txt)
+
+    seq_ax.callbacks.connect("xlim_changed", _redraw_letters)
+
+    def _on_first_draw(_event):
+        if state["first_drawn"]:
+            return
+        state["first_drawn"] = True
+        _redraw_letters()
+        seq_ax.figure.canvas.draw_idle()
+
+    seq_ax.figure.canvas.mpl_connect("draw_event", _on_first_draw)
+
+
+def _sequence_to_rgb_array(sequence: str) -> np.ndarray:
+    """Return a (1, len(sequence), 3) RGB array colored per nucleotide."""
+    n = len(sequence)
+    rgb = np.empty((1, n, 3), dtype=float)
+    default = mcolors.to_rgb(SEQUENCE_COLORS["N"])
+    palette = {b: mcolors.to_rgb(c) for b, c in SEQUENCE_COLORS.items()}
+    for i, base in enumerate(sequence):
+        rgb[0, i] = palette.get(base.upper(), default)
+    return rgb
 
 
 def add_gene_track(
