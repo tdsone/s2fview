@@ -447,6 +447,7 @@ def interactive_coverage_track(
     dpi: int = 100,
     figsize: tuple[float, float] = (9.5, 2.6),
     show_toolbar: bool = True,
+    hover_debounce_ms: int = 120,
     hover_hz: float = 60.0,
     **kwargs,
 ):
@@ -466,10 +467,14 @@ def interactive_coverage_track(
       right.
     * **Click + drag** on a track to zoom into the selected x-range.
     * **Double-click** anywhere on the figure to reset the zoom.
-    * **Hover** to show a thin crosshair and a position readout that spans
-      both the coverage and (if present) the gene track. Hover updates are
-      capped at ``hover_hz`` (default 60). Lower it (e.g. 20) on slow
-      networks; raise it on fast local sessions.
+    * **Hover** to show a thin crosshair and a position readout. The
+      crosshair is *debounced* — it hides while the mouse is moving and
+      re-appears at the current position once the cursor has been
+      motionless for ``hover_debounce_ms`` ms (default 120). This avoids
+      the WebSocket trying to track a fast-moving cursor in real time.
+
+      Set ``hover_debounce_ms=0`` to switch to continuous tracking, in
+      which case ``hover_hz`` (default 60) caps the update rate.
 
     Return type
     -----------
@@ -537,38 +542,80 @@ def interactive_coverage_track(
         zorder=11,
     )
 
-    # Throttle mouse-move updates to ~30 Hz. ipympl's blit() sends a diff
-    # image whose region depends on canvas state and isn't always large
-    # enough to clear the previous crosshair on the browser side (leaves
-    # frozen vertical lines). Full draw_idle is correct but expensive; the
-    # throttle keeps it cheap enough to feel responsive.
+    # Hover behavior:
+    #   - debounce mode (hover_debounce_ms > 0): hide the crosshair on any
+    #     motion, then re-show at the current cursor position once the
+    #     mouse has been motionless for `hover_debounce_ms` ms. Cheap and
+    #     avoids the WebSocket trying to keep up with fast motion.
+    #   - throttle mode (hover_debounce_ms == 0): continuous tracking,
+    #     capped at `hover_hz` updates per second.
     import time
 
-    _last_move = {"t": 0.0, "x": None}
-    _move_period = 1.0 / max(1.0, float(hover_hz))
+    _hover_state: dict = {"visible": False, "pending_x": None, "pending_in": False}
 
-    def _on_move(event):
-        now = time.monotonic()
-        if now - _last_move["t"] < _move_period:
-            return
-        if event.inaxes in tracked_axes and event.xdata is not None:
-            x = event.xdata
-            if _last_move["x"] == x:
-                return
-            _last_move["x"] = x
+    def _hide_crosshair_now() -> None:
+        for line in crosshairs:
+            line.set_alpha(0.0)
+        cursor_text.set_text("")
+        _hover_state["visible"] = False
+        fig.canvas.draw_idle()
+
+    def _show_crosshair_at_pending() -> None:
+        if _hover_state["pending_in"] and _hover_state["pending_x"] is not None:
+            x = _hover_state["pending_x"]
             for line in crosshairs:
                 line.set_xdata([x, x])
                 line.set_alpha(0.7)
             cursor_text.set_text(f"x = {x:.0f}")
+            _hover_state["visible"] = True
         else:
-            if _last_move["x"] is None:
-                return
-            _last_move["x"] = None
             for line in crosshairs:
                 line.set_alpha(0.0)
             cursor_text.set_text("")
-        _last_move["t"] = now
+            _hover_state["visible"] = False
         fig.canvas.draw_idle()
+
+    if hover_debounce_ms > 0:
+        debounce_timer = fig.canvas.new_timer(interval=hover_debounce_ms)
+        debounce_timer.single_shot = True
+        debounce_timer.add_callback(_show_crosshair_at_pending)
+
+        def _on_move(event):
+            in_axes = event.inaxes in tracked_axes and event.xdata is not None
+            _hover_state["pending_in"] = in_axes
+            _hover_state["pending_x"] = event.xdata if in_axes else None
+            # Hide the (now-stale) crosshair immediately on the first move
+            # of a fresh motion burst; subsequent moves are no-ops.
+            if _hover_state["visible"]:
+                _hide_crosshair_now()
+            debounce_timer.stop()
+            debounce_timer.start()
+    else:
+        _move_period = 1.0 / max(1.0, float(hover_hz))
+        _last_move = {"t": 0.0, "x": None}
+
+        def _on_move(event):
+            now = time.monotonic()
+            if now - _last_move["t"] < _move_period:
+                return
+            if event.inaxes in tracked_axes and event.xdata is not None:
+                x = event.xdata
+                if _last_move["x"] == x:
+                    return
+                _last_move["x"] = x
+                for line in crosshairs:
+                    line.set_xdata([x, x])
+                    line.set_alpha(0.7)
+                cursor_text.set_text(f"x = {x:.0f}")
+            else:
+                if _last_move["x"] is None:
+                    return
+                _last_move["x"] = None
+                for line in crosshairs:
+                    line.set_alpha(0.0)
+                cursor_text.set_text("")
+            _last_move["t"] = now
+            fig.canvas.draw_idle()
 
     def _on_click(event):
         if event.dblclick and event.inaxes in tracked_axes:
