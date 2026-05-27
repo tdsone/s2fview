@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pathlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
@@ -8,17 +9,36 @@ import matplotlib as mpl
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import font_manager
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.patches import Polygon
 from matplotlib.widgets import SpanSelector
 
-# Prefer a nicer sans-serif font chain. Matplotlib walks the list and uses the
-# first installed one, silently falling back to the platform default otherwise.
+
+def _register_bundled_fonts() -> None:
+    """Register fonts shipped with the package so matplotlib can find them.
+
+    We bundle Inter (variable) so the viewer looks the same on every machine
+    without relying on the user having Inter pre-installed.
+    """
+    fonts_dir = pathlib.Path(__file__).parent / "fonts"
+    if not fonts_dir.is_dir():
+        return
+    for font_path in fonts_dir.glob("*.ttf"):
+        font_manager.fontManager.addfont(str(font_path))
+
+
+_register_bundled_fonts()
+
+# Prefer Inter, then a chain of macOS / common system fallbacks. Matplotlib
+# walks the list and uses the first one it can resolve, silently falling
+# back to the platform default otherwise.
 mpl.rcParams["font.family"] = "sans-serif"
 mpl.rcParams["font.sans-serif"] = [
-    "Avenir Next",
+    "Inter Variable",
     "Inter",
+    "Avenir Next",
     "SF Pro Text",
     "Helvetica Neue",
     "Helvetica",

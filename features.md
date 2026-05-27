@@ -9,4 +9,4 @@
 - hover over plot and get vertical line as "cursor"
 - should allow dataloading from typical genomic files (i.e. bed/fasta/etc) as well as python natvie data formats such as numpy arrays or torch/jax/tensorflow tensors
 - needs to work in dark mode too
-- different nice looking color palettes
+- different nice looking color palettes 
