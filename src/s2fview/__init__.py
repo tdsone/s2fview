@@ -260,12 +260,18 @@ def interactive_coverage_track(
     genes: Sequence[Gene] | None = None,
     selection_color: str = "#3b7dd8",
     crosshair_color: str = "#555555",
+    dpi: int = 100,
+    figsize: tuple[float, float] = (9.5, 2.6),
     **kwargs,
 ) -> tuple[Figure, Axes]:
     """Like :func:`coverage_track`, plus IGV-style mouse interactions.
 
     Designed for the ``ipympl`` Jupyter backend — activate it with
     ``%matplotlib widget`` in a cell *before* calling this function.
+
+    Defaults to a lower ``dpi`` and a slightly smaller ``figsize`` than the
+    static :func:`coverage_track` so the widget fits inside a notebook column
+    without horizontal overflow. Override either if you want a bigger canvas.
 
     Interactions
     ------------
@@ -278,7 +284,30 @@ def interactive_coverage_track(
     are still attached but won't fire; the figure renders as a normal static
     plot.
     """
-    fig, ax = coverage_track(values, positions, genes=genes, **kwargs)
+    fig, ax = coverage_track(
+        values, positions, genes=genes, dpi=dpi, figsize=figsize, **kwargs
+    )
+
+    # ipympl-specific chrome trimming so the widget fits in a notebook column.
+    # These attributes only exist on the widget backend; ignore otherwise.
+    canvas = fig.canvas
+    for attr in ("header_visible", "footer_visible"):
+        if hasattr(canvas, attr):
+            try:
+                setattr(canvas, attr, False)
+            except Exception:
+                pass
+    if hasattr(canvas, "layout"):
+        try:
+            canvas.layout.width = "100%"
+            canvas.layout.max_width = f"{int(figsize[0] * dpi)}px"
+        except Exception:
+            pass
+    if hasattr(canvas, "capture_scroll"):
+        try:
+            canvas.capture_scroll = True
+        except Exception:
+            pass
     tracked_axes = list(fig.axes)
     original_xlim = ax.get_xlim()
 
