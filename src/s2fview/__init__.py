@@ -511,7 +511,32 @@ def interactive_coverage_track(
         zorder=11,
     )
 
+    # Blit the crosshair + cursor text instead of full-redrawing on every
+    # mouse move. The static plot is cached as a bitmap once and reused;
+    # only the overlay artists are re-rendered per mouse-move event.
+    for _line in crosshairs:
+        _line.set_animated(True)
+    cursor_text.set_animated(True)
+    background: dict = {"bg": None}
+
+    def _draw_overlay() -> None:
+        for line in crosshairs:
+            line.axes.draw_artist(line)
+        cursor_text.axes.draw_artist(cursor_text)
+
+    def _capture_background(_event) -> None:
+        # Fires after every full draw (initial render, zoom, resize). The
+        # animated artists are skipped by the standard draw, so the captured
+        # bitmap is just the static plot.
+        background["bg"] = fig.canvas.copy_from_bbox(fig.bbox)
+        _draw_overlay()
+
+    fig.canvas.mpl_connect("draw_event", _capture_background)
+
     def _on_move(event):
+        bg = background["bg"]
+        if bg is None:
+            return
         if event.inaxes in tracked_axes and event.xdata is not None:
             x = event.xdata
             for line in crosshairs:
@@ -522,7 +547,9 @@ def interactive_coverage_track(
             for line in crosshairs:
                 line.set_alpha(0.0)
             cursor_text.set_text("")
-        fig.canvas.draw_idle()
+        fig.canvas.restore_region(bg)
+        _draw_overlay()
+        fig.canvas.blit(fig.bbox)
 
     def _on_click(event):
         if event.dblclick and event.inaxes in tracked_axes:
