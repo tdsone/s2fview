@@ -511,65 +511,38 @@ def interactive_coverage_track(
         zorder=11,
     )
 
-    # Blit the crosshair + cursor text instead of full-redrawing on every
-    # mouse move. The static plot is cached as a bitmap once and reused;
-    # only the overlay artists are re-rendered per mouse-move event.
-    for _line in crosshairs:
-        _line.set_animated(True)
-    cursor_text.set_animated(True)
-    background: dict = {"bg": None}
+    # Throttle mouse-move updates to ~30 Hz. ipympl's blit() sends a diff
+    # image whose region depends on canvas state and isn't always large
+    # enough to clear the previous crosshair on the browser side (leaves
+    # frozen vertical lines). Full draw_idle is correct but expensive; the
+    # throttle keeps it cheap enough to feel responsive.
+    import time
 
-    def _draw_overlay() -> None:
-        for line in crosshairs:
-            line.axes.draw_artist(line)
-        cursor_text.axes.draw_artist(cursor_text)
-
-    def _capture_background(_event) -> None:
-        # Fires after every full draw (initial render, zoom, resize). The
-        # animated artists are skipped by the standard draw, so the captured
-        # bitmap is pure static plot. Critically, do NOT draw the overlay
-        # into the canvas here: under ipympl the post-draw canvas state is
-        # what gets shipped to the browser, so stamping a crosshair on it
-        # bakes a "frozen" copy into the browser image. The overlay only
-        # appears once the user actually hovers, which is fine.
-        background["bg"] = fig.canvas.copy_from_bbox(fig.bbox)
-
-    fig.canvas.mpl_connect("draw_event", _capture_background)
+    _last_move = {"t": 0.0, "x": None}
+    _move_period = 1.0 / 30.0
 
     def _on_move(event):
-        bg = background["bg"]
-        if bg is None:
+        now = time.monotonic()
+        if now - _last_move["t"] < _move_period:
             return
         if event.inaxes in tracked_axes and event.xdata is not None:
             x = event.xdata
+            if _last_move["x"] == x:
+                return
+            _last_move["x"] = x
             for line in crosshairs:
                 line.set_xdata([x, x])
                 line.set_alpha(0.7)
             cursor_text.set_text(f"x = {x:.0f}")
         else:
+            if _last_move["x"] is None:
+                return
+            _last_move["x"] = None
             for line in crosshairs:
                 line.set_alpha(0.0)
             cursor_text.set_text("")
-        fig.canvas.restore_region(bg)
-        _draw_overlay()
-        fig.canvas.blit(fig.bbox)
-
-    # When the cursor leaves the figure, redraw once so the crosshair is
-    # gone from the browser image (a bare blit may leave the last position
-    # visible on the JS side).
-    def _on_figure_leave(_event):
-        bg = background["bg"]
-        if bg is None:
-            return
-        for line in crosshairs:
-            line.set_alpha(0.0)
-        cursor_text.set_text("")
-        fig.canvas.restore_region(bg)
-        _draw_overlay()
-        fig.canvas.blit(fig.bbox)
-
-    fig.canvas.mpl_connect("figure_leave_event", _on_figure_leave)
-    fig.canvas.mpl_connect("axes_leave_event", _on_figure_leave)
+        _last_move["t"] = now
+        fig.canvas.draw_idle()
 
     def _on_click(event):
         if event.dblclick and event.inaxes in tracked_axes:
