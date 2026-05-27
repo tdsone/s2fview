@@ -403,8 +403,9 @@ def interactive_coverage_track(
     crosshair_color: str = "#555555",
     dpi: int = 100,
     figsize: tuple[float, float] = (9.5, 2.6),
+    show_toolbar: bool = True,
     **kwargs,
-) -> tuple[Figure, Axes]:
+):
     """Like :func:`coverage_track`, plus IGV-style mouse interactions.
 
     Designed for the ``ipympl`` Jupyter backend — activate it with
@@ -416,18 +417,34 @@ def interactive_coverage_track(
 
     Interactions
     ------------
+    * **Toolbar** (when ``show_toolbar=True`` and ``ipywidgets`` is available):
+      ``◀`` pan left, ``−`` zoom out, ``⌂`` reset, ``+`` zoom in, ``▶`` pan
+      right.
     * **Click + drag** on a track to zoom into the selected x-range.
     * **Double-click** anywhere on the figure to reset the zoom.
     * **Hover** to show a thin crosshair and a position readout that spans
       both the coverage and (if present) the gene track.
 
-    Without an interactive backend (e.g. plain inline / Agg), the callbacks
-    are still attached but won't fire; the figure renders as a normal static
-    plot.
+    Return type
+    -----------
+    Under the widget backend with ``ipywidgets`` installed, returns an
+    ``ipywidgets.VBox`` containing the toolbar + canvas — display it directly.
+    Otherwise returns ``(fig, ax)`` so the static-backend path keeps working.
     """
-    fig, ax = coverage_track(
-        values, positions, genes=genes, dpi=dpi, figsize=figsize, **kwargs
-    )
+    backend = mpl.get_backend().lower()
+    is_widget = "ipympl" in backend or "widget" in backend or "nbagg" in backend
+
+    # In widget mode, suppress matplotlib's auto-display so the figure only
+    # appears inside our composed VBox.
+    if is_widget and show_toolbar:
+        plt.ioff()
+    try:
+        fig, ax = coverage_track(
+            values, positions, genes=genes, dpi=dpi, figsize=figsize, **kwargs
+        )
+    finally:
+        if is_widget and show_toolbar:
+            plt.ion()
 
     # ipympl-specific chrome trimming so the widget fits in a notebook column.
     # These attributes only exist on the widget backend; ignore otherwise.
@@ -514,7 +531,72 @@ def interactive_coverage_track(
     # Keep references alive so widgets aren't garbage-collected.
     fig._s2fview_widgets = (span,)  # type: ignore[attr-defined]
 
+    if is_widget and show_toolbar:
+        toolbar = _make_zoom_toolbar(ax, fig, original_xlim)
+        if toolbar is not None:
+            try:
+                import ipywidgets as widgets
+            except ImportError:
+                return fig, ax
+            return widgets.VBox([toolbar, fig.canvas])
+
     return fig, ax
+
+
+def _make_zoom_toolbar(ax: Axes, fig: Figure, original_xlim: tuple[float, float]):
+    """Return an ipywidgets HBox of pan / zoom / reset buttons, or None."""
+    try:
+        import ipywidgets as widgets
+    except ImportError:
+        return None
+
+    def _set_xlim(x0: float, x1: float) -> None:
+        lo, hi = sorted(original_xlim)
+        x0 = max(lo, x0)
+        x1 = min(hi, x1)
+        if x1 - x0 < 1:
+            return
+        ax.set_xlim(x0, x1)
+        fig.canvas.draw_idle()
+
+    def _zoom(factor: float) -> None:
+        x0, x1 = ax.get_xlim()
+        center = (x0 + x1) / 2
+        new_half = (x1 - x0) / 2 * factor
+        _set_xlim(center - new_half, center + new_half)
+
+    def _pan(direction: float) -> None:
+        x0, x1 = ax.get_xlim()
+        shift = (x1 - x0) * 0.25 * direction
+        # Clamp so we don't pan past the data edges.
+        lo, hi = sorted(original_xlim)
+        if shift < 0:
+            shift = max(shift, lo - x0)
+        else:
+            shift = min(shift, hi - x1)
+        _set_xlim(x0 + shift, x1 + shift)
+
+    def _reset() -> None:
+        ax.set_xlim(original_xlim)
+        fig.canvas.draw_idle()
+
+    btn_layout = widgets.Layout(width="38px", padding="0px")
+    pan_l = widgets.Button(icon="caret-left", tooltip="Pan left", layout=btn_layout)
+    zoom_out = widgets.Button(icon="search-minus", tooltip="Zoom out", layout=btn_layout)
+    reset = widgets.Button(icon="home", tooltip="Reset zoom", layout=btn_layout)
+    zoom_in = widgets.Button(icon="search-plus", tooltip="Zoom in", layout=btn_layout)
+    pan_r = widgets.Button(icon="caret-right", tooltip="Pan right", layout=btn_layout)
+
+    pan_l.on_click(lambda _b: _pan(-1))
+    zoom_out.on_click(lambda _b: _zoom(2.0))
+    reset.on_click(lambda _b: _reset())
+    zoom_in.on_click(lambda _b: _zoom(0.5))
+    pan_r.on_click(lambda _b: _pan(+1))
+
+    return widgets.HBox(
+        [pan_l, zoom_out, reset, zoom_in, pan_r],
+        layout=widgets.Layout(justify_content="center"),
+    )
 
 
 def _exon_polygon(
