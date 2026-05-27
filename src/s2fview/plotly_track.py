@@ -82,7 +82,7 @@ def plotly_coverage_track(
     row_heights: list[float] = [1.0]
     if sequence is not None:
         rows.append("sequence")
-        row_heights.append(0.12)
+        row_heights.append(0.25)
     lanes: list[int] = []
     n_lanes = 0
     if genes:
@@ -139,8 +139,43 @@ def plotly_coverage_track(
             row=seq_row,
             col=1,
         )
+        # Letter glyphs as a Scatter text trace on top of the heatmap. They
+        # are clipped to the axis (cliponaxis=True is default) and Plotly's
+        # text renderer just stamps them at the data positions. When zoomed
+        # out the letters overlap into a blur; the JS post-processing below
+        # toggles their visibility based on the visible base density so
+        # they only show up when there's pixel room for them to read.
+        seq_upper = sequence.upper()
+        # Heatmap with no y= defaults to row indices; for a single-row z the
+        # cell vertically spans y in [-0.5, 0.5]. Center the letter glyphs at
+        # y=0 so they sit dead-center on the colored cells.
+        fig.add_trace(
+            go.Scatter(
+                x=list(positions),
+                y=[0.0] * len(positions),
+                mode="text",
+                text=list(seq_upper),
+                textposition="middle center",
+                textfont={
+                    "family": "Inter, -apple-system, Helvetica, Arial, sans-serif",
+                    "size": 13,
+                    "color": "white",
+                    "weight": "bold",
+                },
+                hoverinfo="skip",
+                showlegend=False,
+                name="sequence_letters",
+            ),
+            row=seq_row,
+            col=1,
+        )
         fig.update_yaxes(
-            showticklabels=False, showgrid=False, zeroline=False, row=seq_row, col=1
+            range=[-0.5, 0.5],
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+            row=seq_row,
+            col=1,
         )
 
     if genes:
@@ -199,7 +234,47 @@ def plotly_coverage_track(
 
     fig.update_yaxes(title_text="Coverage", row=1, col=1, zeroline=True, zerolinecolor="#cccccc")
 
-    return fig
+    if sequence is None:
+        return fig
+
+    # Lazy letters: when sequence is shown, wrap as a FigureWidget and bind
+    # an on-relayout callback that toggles the letter trace's visibility
+    # based on visible base density. Letters only render when zoomed in
+    # enough that each base gets ~font-size pixels of horizontal room.
+    fw = go.FigureWidget(fig)
+    # Find the sequence-letters scatter trace (added second in seq row).
+    letter_trace_idx: int | None = None
+    for i, tr in enumerate(fw.data):
+        if getattr(tr, "name", None) == "sequence_letters":
+            letter_trace_idx = i
+            break
+
+    if letter_trace_idx is None:
+        return fw
+
+    seq_len = len(sequence)
+    full_xrange = (float(positions[0]) - 0.5, float(positions[-1]) + 0.5)
+    # Approximate canvas-px-per-base at full zoom; we use this to decide a
+    # base-count threshold below which letters are dense enough to read.
+    plot_width_px = max(1, width - 80)  # rough plot area after margins
+    visible_bases_threshold = max(8, plot_width_px // 10)  # ~10 px per letter
+
+    def _toggle_letters(layout, x_range=None):
+        # x_range comes through as (lo, hi); fall back to current xaxis range.
+        if x_range is None:
+            ax = fw.layout.xaxis
+            xr = getattr(ax, "range", None)
+            if xr is None:
+                xr = full_xrange
+            x_range = (float(xr[0]), float(xr[1]))
+        visible = (x_range[1] - x_range[0]) <= visible_bases_threshold
+        with fw.batch_update():
+            fw.data[letter_trace_idx].visible = bool(visible)
+
+    fw.data[letter_trace_idx].visible = False  # hidden until zoomed in enough
+    fw.layout.on_change(_toggle_letters, "xaxis.range")
+
+    return fw
 
 
 def _add_gene_shapes(
