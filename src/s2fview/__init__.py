@@ -447,6 +447,7 @@ def interactive_coverage_track(
     dpi: int = 100,
     figsize: tuple[float, float] = (9.5, 2.6),
     show_toolbar: bool = True,
+    hover_hz: float = 60.0,
     **kwargs,
 ):
     """Like :func:`coverage_track`, plus IGV-style mouse interactions.
@@ -466,7 +467,9 @@ def interactive_coverage_track(
     * **Click + drag** on a track to zoom into the selected x-range.
     * **Double-click** anywhere on the figure to reset the zoom.
     * **Hover** to show a thin crosshair and a position readout that spans
-      both the coverage and (if present) the gene track.
+      both the coverage and (if present) the gene track. Hover updates are
+      capped at ``hover_hz`` (default 60). Lower it (e.g. 20) on slow
+      networks; raise it on fast local sessions.
 
     Return type
     -----------
@@ -542,7 +545,7 @@ def interactive_coverage_track(
     import time
 
     _last_move = {"t": 0.0, "x": None}
-    _move_period = 1.0 / 60.0
+    _move_period = 1.0 / max(1.0, float(hover_hz))
 
     def _on_move(event):
         now = time.monotonic()
