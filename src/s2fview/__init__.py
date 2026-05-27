@@ -527,9 +527,12 @@ def interactive_coverage_track(
     def _capture_background(_event) -> None:
         # Fires after every full draw (initial render, zoom, resize). The
         # animated artists are skipped by the standard draw, so the captured
-        # bitmap is just the static plot.
+        # bitmap is pure static plot. Critically, do NOT draw the overlay
+        # into the canvas here: under ipympl the post-draw canvas state is
+        # what gets shipped to the browser, so stamping a crosshair on it
+        # bakes a "frozen" copy into the browser image. The overlay only
+        # appears once the user actually hovers, which is fine.
         background["bg"] = fig.canvas.copy_from_bbox(fig.bbox)
-        _draw_overlay()
 
     fig.canvas.mpl_connect("draw_event", _capture_background)
 
@@ -550,6 +553,23 @@ def interactive_coverage_track(
         fig.canvas.restore_region(bg)
         _draw_overlay()
         fig.canvas.blit(fig.bbox)
+
+    # When the cursor leaves the figure, redraw once so the crosshair is
+    # gone from the browser image (a bare blit may leave the last position
+    # visible on the JS side).
+    def _on_figure_leave(_event):
+        bg = background["bg"]
+        if bg is None:
+            return
+        for line in crosshairs:
+            line.set_alpha(0.0)
+        cursor_text.set_text("")
+        fig.canvas.restore_region(bg)
+        _draw_overlay()
+        fig.canvas.blit(fig.bbox)
+
+    fig.canvas.mpl_connect("figure_leave_event", _on_figure_leave)
+    fig.canvas.mpl_connect("axes_leave_event", _on_figure_leave)
 
     def _on_click(event):
         if event.dblclick and event.inaxes in tracked_axes:
