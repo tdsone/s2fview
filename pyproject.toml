@@ -5,6 +5,8 @@ description = "like igv in jupyter notebooks but better"
 authors = [
     { name = "Timon Schneider", email = "mail@timonschneider.de" }
 ]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "anywidget>=0.11.0",
