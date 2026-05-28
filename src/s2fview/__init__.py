@@ -1,50 +1,22 @@
+"""s2fview: a Plotly-based genome track viewer for Jupyter.
+
+The viewer renders coverage + DNA sequence + gene annotations as a stack of
+client-side Plotly subplots. Hover (spike-line crosshair), pan, zoom, and
+reset are all native browser interactions — there is no Python round-trip
+per mouse move, so it stays smooth on remote kernels.
+
+The main entrypoint is :func:`coverage_track`. :class:`Gene` is a tiny
+dataclass for gene annotations.
+"""
+
 from __future__ import annotations
 
-import pathlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-import matplotlib as mpl
-import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib import font_manager
-from matplotlib.axes import Axes
-from matplotlib.collections import PolyCollection
-from matplotlib.figure import Figure
-from matplotlib.patches import Polygon
-from matplotlib.widgets import SpanSelector
-
-
-def _register_bundled_fonts() -> None:
-    """Register fonts shipped with the package so matplotlib can find them.
-
-    We bundle Inter (variable) so the viewer looks the same on every machine
-    without relying on the user having Inter pre-installed.
-    """
-    fonts_dir = pathlib.Path(__file__).parent / "fonts"
-    if not fonts_dir.is_dir():
-        return
-    for font_path in fonts_dir.glob("*.ttf"):
-        font_manager.fontManager.addfont(str(font_path))
-
-
-_register_bundled_fonts()
-
-# Prefer Inter, then a chain of macOS / common system fallbacks. Matplotlib
-# walks the list and uses the first one it can resolve, silently falling
-# back to the platform default otherwise.
-mpl.rcParams["font.family"] = "sans-serif"
-mpl.rcParams["font.sans-serif"] = [
-    "Inter Variable",
-    "Inter",
-    "Avenir Next",
-    "SF Pro Text",
-    "Helvetica Neue",
-    "Helvetica",
-    *mpl.rcParams["font.sans-serif"],
-]
+if TYPE_CHECKING:
+    import plotly.graph_objects as go  # noqa: F401
 
 
 # IGV-ish palette for DNA bases. Saturated enough to be unambiguous, soft
@@ -56,6 +28,17 @@ SEQUENCE_COLORS: dict[str, str] = {
     "T": "#d65a4a",  # red
     "N": "#a8a8a8",  # gray fallback
 }
+
+_BASE_TO_IDX = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
+_SEQ_COLORS_ORDERED = [
+    SEQUENCE_COLORS["A"],
+    SEQUENCE_COLORS["C"],
+    SEQUENCE_COLORS["G"],
+    SEQUENCE_COLORS["T"],
+    SEQUENCE_COLORS["N"],
+]
+
+_FONT_STACK = "Inter, -apple-system, Helvetica, Arial, sans-serif"
 
 
 @dataclass(frozen=True)
@@ -89,27 +72,32 @@ def coverage_track(
     color: str = "#3b7dd8",
     forward_color: str = "#2563eb",
     reverse_color: str = "#dc2626",
-    label: str | None = None,
+    crosshair_color: str = "#555555",
     title: str | None = None,
-    xlabel: str | None = None,
-    ylabel: str = "Coverage",
-    figsize: tuple[float, float] = (10, 2.2),
-    dpi: int = 200,
-    guide_color: str = "#9a9a9a",
-) -> tuple[Figure, Axes]:
-    """Plot a coverage track, optionally with a DNA sequence and a gene track.
+    width: int = 950,
+    height: int | None = None,
+    show_chevrons: bool = True,
+):
+    """Build a Plotly viewer with coverage + optional sequence + gene tracks.
 
-    When ``sequence`` and/or ``genes`` are provided, the figure becomes a
-    stack of x-shared axes:
+    All interactions run client-side — hover spike-lines, pan, zoom, and the
+    standard Plotly modebar. The figure is a stack of x-shared subplots:
 
-    * Coverage (top, with tick labels)
-    * DNA sequence strip (colored cells per base; letters appear only when
-      there's enough pixel room — they re-render lazily on zoom)
-    * Gene annotation track (auto-stacked into lanes for overlapping genes)
+    * Coverage (top) — filled step area, with tick labels.
+    * DNA sequence (middle, when ``sequence`` is provided) — colored cells
+      per base, with bold letters that appear on zoom-in.
+    * Gene track (bottom, when ``genes`` is provided) — exon boxes with a
+      directional arrow tip on the terminal exon, thin intron lines with
+      strand chevrons, and gene-name labels color-coded by strand.
 
-    Returns ``(fig, coverage_axes)``; additional axes are available via
-    ``fig.axes``.
+    Returns either a ``plotly.graph_objects.Figure`` or, when ``sequence``
+    is provided, a ``plotly.graph_objects.FigureWidget`` (needed for the
+    on-zoom letter-visibility callback). Both render directly in Jupyter
+    via their ``_repr_mimebundle_``.
     """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
     if positions is None:
         positions = list(range(len(values)))
     if len(positions) != len(values):
@@ -123,262 +111,294 @@ def coverage_track(
             f"(got {len(sequence)} and {len(values)})"
         )
 
-    has_sequence = sequence is not None
-    has_genes = bool(genes)
-
-    sizes_inches: list[float] = [figsize[1]]
-    if has_sequence:
-        sizes_inches.append(0.30)
-    lanes: list[int] | None = None
-    if has_genes:
-        assert genes is not None
+    rows: list[str] = ["coverage"]
+    row_heights: list[float] = [1.0]
+    if sequence is not None:
+        rows.append("sequence")
+        row_heights.append(0.25)
+    lanes: list[int] = []
+    n_lanes = 0
+    if genes:
         lanes = _assign_lanes(genes)
         n_lanes = max(lanes) + 1
-        sizes_inches.append(max(0.5, 0.4 * n_lanes))
+        rows.append("genes")
+        row_heights.append(0.10 * n_lanes + 0.05)
 
-    gene_ax: Axes | None = None
-    seq_ax: Axes | None = None
+    n_rows = len(rows)
+    fig = make_subplots(
+        rows=n_rows,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=row_heights,
+        vertical_spacing=0.03,
+    )
 
-    if len(sizes_inches) == 1:
-        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    else:
-        gap_inches = 0.45
-        n_rows = len(sizes_inches)
-        avg_axes_h = sum(sizes_inches) / n_rows
-        fig = plt.figure(
-            figsize=(figsize[0], sum(sizes_inches) + (n_rows - 1) * gap_inches),
-            dpi=dpi,
+    fig.add_trace(
+        go.Scatter(
+            x=list(positions),
+            y=list(values),
+            mode="lines",
+            line={"color": color, "width": 1, "shape": "hv"},
+            fill="tozeroy",
+            fillcolor=color,
+            opacity=0.85,
+            name="coverage",
+            hovertemplate="x = %{x}<br>coverage = %{y}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    if sequence is not None:
+        seq_row = 2
+        indices = [[_BASE_TO_IDX.get(b.upper(), 4) for b in sequence]]
+        # Discrete colorscale so each integer maps to one color.
+        n = len(_SEQ_COLORS_ORDERED)
+        colorscale = []
+        for i, c in enumerate(_SEQ_COLORS_ORDERED):
+            colorscale.append([i / n, c])
+            colorscale.append([(i + 1) / n, c])
+        fig.add_trace(
+            go.Heatmap(
+                z=indices,
+                x=list(positions),
+                zmin=-0.5,
+                zmax=n - 0.5,
+                colorscale=colorscale,
+                showscale=False,
+                hovertemplate="x = %{x}<br>base = %{customdata}<extra></extra>",
+                customdata=[list(sequence)],
+            ),
+            row=seq_row,
+            col=1,
         )
-        gs = fig.add_gridspec(
-            n_rows,
-            1,
-            height_ratios=sizes_inches,
-            hspace=gap_inches / avg_axes_h,
+        # Letter glyphs as a Scatter text trace on top of the heatmap. Hidden
+        # initially; the FigureWidget callback below flips visibility based on
+        # visible base density.
+        seq_upper = sequence.upper()
+        fig.add_trace(
+            go.Scatter(
+                x=list(positions),
+                y=[0.0] * len(positions),
+                mode="text",
+                text=list(seq_upper),
+                textposition="middle center",
+                textfont={
+                    "family": _FONT_STACK,
+                    "size": 13,
+                    "color": "white",
+                    "weight": "bold",
+                },
+                hoverinfo="skip",
+                showlegend=False,
+                name="sequence_letters",
+            ),
+            row=seq_row,
+            col=1,
         )
-        ax = fig.add_subplot(gs[0])
-        idx = 1
-        if has_sequence:
-            seq_ax = fig.add_subplot(gs[idx], sharex=ax)
-            idx += 1
-        if has_genes:
-            gene_ax = fig.add_subplot(gs[idx], sharex=ax)
-        ax.tick_params(labelbottom=True)
+        fig.update_yaxes(
+            range=[-0.5, 0.5],
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+            row=seq_row,
+            col=1,
+        )
 
-    ax.fill_between(positions, values, step="mid", color=color, alpha=0.85, label=label)
-    ax.plot(positions, values, drawstyle="steps-mid", color=color, linewidth=0.8)
-
-    # When a sequence is shown, widen xlim to match the cell extents so the
-    # first/last bases aren't clipped in half.
-    xlim_pad = 0.5 if has_sequence else 0
-    ax.set_xlim(positions[0] - xlim_pad, positions[-1] + xlim_pad)
-    ax.set_ylim(bottom=0)
-    ax.margins(x=0)
-    if xlabel:
-        ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    if title:
-        ax.set_title(title)
-    if label:
-        ax.legend(loc="upper right", frameon=False)
-
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    if seq_ax is not None:
-        assert sequence is not None
-        add_sequence_track(seq_ax, sequence, start=int(positions[0]))
-
-    if gene_ax is not None:
-        assert genes is not None
-        add_gene_track(
-            gene_ax,
+    if genes:
+        gene_row = n_rows
+        _add_gene_shapes(
+            fig,
             genes,
-            forward_color=forward_color,
-            reverse_color=reverse_color,
-            lanes=lanes,
+            lanes,
+            forward_color,
+            reverse_color,
+            gene_row,
+            x_range=(float(positions[0]), float(positions[-1])),
+            show_chevrons=show_chevrons,
         )
-        gene_ax.set_xlabel("")
-        boundary_xs = sorted({x for g in genes for x in (g.start, g.end)})
-        for x in boundary_xs:
-            for guide_ax in (ax, gene_ax):
-                guide_ax.axvline(
-                    x,
-                    linestyle=(0, (1, 2)),
-                    color=guide_color,
-                    linewidth=0.7,
-                    alpha=0.8,
-                    zorder=0,
-                )
+        fig.update_yaxes(
+            range=[n_lanes, 0],  # lane 0 at top
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+            row=gene_row,
+            col=1,
+        )
 
-    return fig, ax
-
-
-def add_sequence_track(
-    seq_ax: Axes,
-    sequence: str,
-    start: int = 0,
-    *,
-    fontsize: float = 7.0,
-    letter_color: str = "white",
-) -> None:
-    """Render a DNA sequence as a one-row colored strip on ``seq_ax``.
-
-    The colored cells (one per base) are drawn as a single ``imshow`` so the
-    cost is independent of sequence length. Individual base letters render
-    on top *lazily* — they only appear when there's enough horizontal pixel
-    room per base, and they're re-rendered for the visible window whenever
-    the axes' xlim changes (e.g. on zoom).
-
-    ``start`` is the genomic position of ``sequence[0]``.
-    """
-    n = len(sequence)
-    rgb = _sequence_to_rgb_array(sequence)
-
-    seq_ax.imshow(
-        rgb,
-        aspect="auto",
-        extent=(start - 0.5, start + n - 0.5, 0, 1),
-        interpolation="nearest",
-        zorder=1,
+    # Native spike-line crosshair on the shared x-axis — drawn by Plotly
+    # client-side, no Python round-trip.
+    fig.update_xaxes(
+        showspikes=True,
+        spikemode="across",
+        spikethickness=1,
+        spikedash="dot",
+        spikecolor=crosshair_color,
+        showline=False,
     )
-    seq_ax.set_ylim(0, 1)
-    seq_ax.set_yticks([])
-    seq_ax.tick_params(
-        axis="x", which="both", length=0, labelbottom=False, labeltop=False
+
+    # Tick labels on the coverage axis only.
+    fig.update_xaxes(showticklabels=True, row=1, col=1)
+    for r in range(2, n_rows + 1):
+        fig.update_xaxes(showticklabels=False, row=r, col=1)
+
+    if height is None:
+        height = (
+            300
+            + (80 if sequence is not None else 0)
+            + (40 * max(1, n_lanes) if genes else 0)
+        )
+
+    fig.update_layout(
+        title=title,
+        width=width,
+        height=height,
+        hovermode="x",
+        showlegend=False,
+        margin={"l": 60, "r": 20, "t": 50 if title else 20, "b": 40},
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font={"family": _FONT_STACK},
+        modebar={"orientation": "v"},
     )
-    for spine in seq_ax.spines.values():
-        spine.set_visible(False)
 
-    # Match xlim to the sequence range if nothing has set it yet.
-    if seq_ax.get_xlim() == (0.0, 1.0):
-        seq_ax.set_xlim(start - 0.5, start + n - 0.5)
+    fig.update_yaxes(title_text="Coverage", row=1, col=1, zeroline=True, zerolinecolor="#cccccc")
 
-    letter_texts: list = []
-    state = {"first_drawn": False}
+    if sequence is None:
+        return fig
 
-    def _redraw_letters(*_):
-        for txt in letter_texts:
-            txt.remove()
-        letter_texts.clear()
+    # Lazy letters: wrap as a FigureWidget and bind a relayout callback that
+    # toggles the letter trace's visibility based on visible base density.
+    fw = go.FigureWidget(fig)
+    letter_trace_idx: int | None = None
+    for i, tr in enumerate(fw.data):
+        if getattr(tr, "name", None) == "sequence_letters":
+            letter_trace_idx = i
+            break
 
-        bbox = seq_ax.get_window_extent()
-        if bbox.width <= 0:
-            return
+    if letter_trace_idx is None:
+        return fw
 
-        x0, x1 = seq_ax.get_xlim()
-        pixels_per_base = bbox.width / max(1e-9, x1 - x0)
-        # Need roughly the letter width plus a bit of padding.
-        if pixels_per_base < fontsize * 1.2:
-            return
+    plot_width_px = max(1, width - 80)
+    visible_bases_threshold = max(8, plot_width_px // 10)  # ~10 px per letter
 
-        i_min = max(0, int(np.floor(x0 - start)))
-        i_max = min(n, int(np.ceil(x1 - start)) + 1)
+    def _toggle_letters(layout, x_range=None):
+        if x_range is None:
+            xr = getattr(fw.layout.xaxis, "range", None)
+            if xr is None:
+                xr = (float(positions[0]) - 0.5, float(positions[-1]) + 0.5)
+            x_range = (float(xr[0]), float(xr[1]))
+        visible = (x_range[1] - x_range[0]) <= visible_bases_threshold
+        with fw.batch_update():
+            fw.data[letter_trace_idx].visible = bool(visible)
 
-        for i in range(i_min, i_max):
-            txt = seq_ax.text(
-                start + i,
-                0.5,
-                sequence[i].upper(),
-                ha="center",
-                va="center",
-                color=letter_color,
-                fontsize=fontsize,
-                fontweight="bold",
-                zorder=2,
-                clip_on=True,
-            )
-            letter_texts.append(txt)
+    fw.data[letter_trace_idx].visible = False
+    fw.layout.on_change(_toggle_letters, "xaxis.range")
 
-    seq_ax.callbacks.connect("xlim_changed", _redraw_letters)
-
-    def _on_first_draw(_event):
-        if state["first_drawn"]:
-            return
-        state["first_drawn"] = True
-        _redraw_letters()
-        seq_ax.figure.canvas.draw_idle()
-
-    seq_ax.figure.canvas.mpl_connect("draw_event", _on_first_draw)
+    return fw
 
 
-def _sequence_to_rgb_array(sequence: str) -> np.ndarray:
-    """Return a (1, len(sequence), 3) RGB array colored per nucleotide."""
-    n = len(sequence)
-    rgb = np.empty((1, n, 3), dtype=float)
-    default = mcolors.to_rgb(SEQUENCE_COLORS["N"])
-    palette = {b: mcolors.to_rgb(c) for b, c in SEQUENCE_COLORS.items()}
-    for i, base in enumerate(sequence):
-        rgb[0, i] = palette.get(base.upper(), default)
-    return rgb
-
-
-def add_gene_track(
-    gene_ax: Axes,
+def _add_gene_shapes(
+    fig,
     genes: Sequence[Gene],
-    *,
-    forward_color: str = "#2563eb",
-    reverse_color: str = "#dc2626",
-    label: bool = True,
-    fontsize: float = 8.0,
-    arrow: bool = True,
-    lanes: Sequence[int] | None = None,
+    lanes: Sequence[int],
+    forward_color: str,
+    reverse_color: str,
+    row: int,
+    x_range: tuple[float, float],
+    show_chevrons: bool,
 ) -> None:
-    """Draw genes (with optional intron/exon structure) on a dedicated axes.
+    """Draw gene boxes (with arrow tips) + chevrons + labels in ``row``.
 
-    Forward-strand (+) and reverse-strand (-) genes get different colors *and*
-    a directional arrow tip on the terminal exon. Overlapping genes are
-    auto-stacked into lanes (top-to-bottom). The axes is stripped of ticks,
-    labels, and spines so it acts as a clean annotation strip.
+    Each gene gets one ``Scatter`` polygon trace for its exons (so the box
+    hover-tests as a unit with a per-gene tooltip), a thin line trace for
+    introns, and an annotation for the name.
     """
-    if lanes is None:
-        lanes = _assign_lanes(genes)
-    n_lanes = max(lanes, default=0) + 1
+    import plotly.graph_objects as go
 
-    gene_ax.set_ylim(n_lanes, 0)  # lane 0 at top
-    gene_ax.set_yticks([])
-    gene_ax.tick_params(
-        axis="x", which="both", length=0, labelbottom=False, labeltop=False
-    )
-    for spine in gene_ax.spines.values():
-        spine.set_visible(False)
-
-    # Arrow-tip width: a small fraction of the visible x-range so the tip
-    # reads as consistent across the figure, regardless of gene length.
-    xmin, xmax = gene_ax.get_xlim()
-    arrow_w_base = max(1.0, (xmax - xmin) * 0.012)
-    chev_half_w = max(0.5, (xmax - xmin) * 0.005)
+    span = x_range[1] - x_range[0]
+    arrow_w = max(1.0, span * 0.012)
+    chev_half_w = max(0.5, span * 0.005)
     chev_half_h = 0.12
-
-    # Collect chevron triangles for ALL genes into a single PolyCollection;
-    # one draw call is dramatically faster than rendering each chevron as a
-    # text glyph (text path rasterization is ~the dominant cost per redraw).
-    chev_verts: list[list[tuple[float, float]]] = []
-    chev_colors: list[str] = []
-
     box_h = 0.55
+
     for gene, lane in zip(genes, lanes):
         gene_color = forward_color if gene.strand == "+" else reverse_color
         center_y = lane + 0.5
-        box_y0 = center_y - box_h / 2
+        y0 = center_y - box_h / 2
+        y1 = center_y + box_h / 2
 
-        # Thin intron line spanning the full gene
-        gene_ax.plot(
-            [gene.start, gene.end],
-            [center_y, center_y],
-            color=gene_color,
-            linewidth=1.1,
-            solid_capstyle="butt",
-            zorder=1,
+        fig.add_trace(
+            go.Scatter(
+                x=[gene.start, gene.end],
+                y=[center_y, center_y],
+                mode="lines",
+                line={"color": gene_color, "width": 1.5},
+                hoverinfo="skip",
+                showlegend=False,
+            ),
+            row=row,
+            col=1,
         )
 
-        # Strand chevrons along the intron line; gene exon boxes (zorder=2)
-        # cover the ones that fall inside exons, so visually they only show
-        # in introns.
-        if arrow:
-            span = gene.end - gene.start
-            n_chev = max(1, int(span / 35))
+        exons = sorted(gene.exons) if gene.exons else [(gene.start, gene.end)]
+        terminal_idx = len(exons) - 1 if gene.strand == "+" else 0
+        xs: list[float] = []
+        ys: list[float] = []
+        for i, (ex_start, ex_end) in enumerate(exons):
+            if i > 0:
+                xs.append(None)
+                ys.append(None)
+            verts = _exon_vertices(
+                ex_start,
+                ex_end,
+                y0,
+                y1,
+                center_y,
+                arrow_side=("right" if gene.strand == "+" else "left")
+                if i == terminal_idx
+                else None,
+                arrow_width=min(arrow_w, (ex_end - ex_start) * 0.5),
+            )
+            for vx, vy in verts:
+                xs.append(vx)
+                ys.append(vy)
+
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                fill="toself",
+                fillcolor=gene_color,
+                mode="lines",
+                line={"color": gene_color, "width": 0},
+                hovertemplate=(
+                    f"<b>{gene.name}</b><br>"
+                    f"{gene.start:,}–{gene.end:,} ({gene.strand})<extra></extra>"
+                ),
+                showlegend=False,
+            ),
+            row=row,
+            col=1,
+        )
+
+        fig.add_annotation(
+            x=(gene.start + gene.end) / 2,
+            y=lane + 0.12,
+            text=gene.name,
+            showarrow=False,
+            font={"color": gene_color, "size": 10},
+            xref=f"x{row}" if row > 1 else "x",
+            yref=f"y{row}" if row > 1 else "y",
+        )
+
+        if show_chevrons:
+            chev_xs: list[float] = []
+            chev_ys: list[float] = []
+            span_g = gene.end - gene.start
+            n_chev = max(1, int(span_g / 35))
             for k in range(n_chev):
-                cx = gene.start + (k + 0.5) * span / n_chev
+                cx = gene.start + (k + 0.5) * span_g / n_chev
                 if gene.strand == "+":
                     tri = [
                         (cx - chev_half_w, center_y - chev_half_h),
@@ -391,357 +411,61 @@ def add_gene_track(
                         (cx - chev_half_w, center_y),
                         (cx + chev_half_w, center_y + chev_half_h),
                     ]
-                chev_verts.append(tri)
-                chev_colors.append(gene_color)
-
-        # Exon shapes: terminal exon (in transcription direction) gets a
-        # pointy arrow tip; the rest are plain rectangles.
-        exons = sorted(gene.exons) if gene.exons else [(gene.start, gene.end)]
-        terminal_idx = len(exons) - 1 if gene.strand == "+" else 0
-        arrow_side: Literal["left", "right"] = "right" if gene.strand == "+" else "left"
-
-        for i, (ex_start, ex_end) in enumerate(exons):
-            if i == terminal_idx:
-                tip_w = min(arrow_w_base, (ex_end - ex_start) * 0.5)
-                verts = _exon_polygon(
-                    ex_start, ex_end, box_y0, box_h,
-                    arrow_side=arrow_side, arrow_width=tip_w,
+                if chev_xs:
+                    chev_xs.append(None)
+                    chev_ys.append(None)
+                for vx, vy in tri:
+                    chev_xs.append(vx)
+                    chev_ys.append(vy)
+            if chev_xs:
+                fig.add_trace(
+                    go.Scatter(
+                        x=chev_xs,
+                        y=chev_ys,
+                        fill="toself",
+                        fillcolor=gene_color,
+                        mode="lines",
+                        line={"color": gene_color, "width": 0},
+                        hoverinfo="skip",
+                        showlegend=False,
+                    ),
+                    row=row,
+                    col=1,
                 )
-            else:
-                verts = _exon_polygon(ex_start, ex_end, box_y0, box_h)
-            gene_ax.add_patch(
-                Polygon(verts, closed=True, facecolor=gene_color, edgecolor="none", zorder=2)
-            )
-
-        if label:
-            gene_ax.text(
-                (gene.start + gene.end) / 2,
-                lane + 0.12,
-                gene.name,
-                ha="center",
-                va="center",
-                fontsize=fontsize - 0.5,
-                color=gene_color,
-                zorder=3,
-                clip_on=False,
-            )
-
-    if chev_verts:
-        gene_ax.add_collection(
-            PolyCollection(
-                chev_verts,
-                facecolors=chev_colors,
-                edgecolors="none",
-                zorder=1,
-            )
-        )
 
 
-def interactive_coverage_track(
-    values: Sequence[float],
-    positions: Sequence[int] | None = None,
-    *,
-    genes: Sequence[Gene] | None = None,
-    selection_color: str = "#3b7dd8",
-    crosshair_color: str = "#555555",
-    dpi: int = 100,
-    figsize: tuple[float, float] = (9.5, 2.6),
-    show_toolbar: bool = True,
-    hover_debounce_ms: int = 120,
-    hover_hz: float = 60.0,
-    **kwargs,
-):
-    """Like :func:`coverage_track`, plus IGV-style mouse interactions.
-
-    Designed for the ``ipympl`` Jupyter backend — activate it with
-    ``%matplotlib widget`` in a cell *before* calling this function.
-
-    Defaults to a lower ``dpi`` and a slightly smaller ``figsize`` than the
-    static :func:`coverage_track` so the widget fits inside a notebook column
-    without horizontal overflow. Override either if you want a bigger canvas.
-
-    Interactions
-    ------------
-    * **Toolbar** (when ``show_toolbar=True`` and ``ipywidgets`` is available):
-      ``◀`` pan left, ``−`` zoom out, ``⌂`` reset, ``+`` zoom in, ``▶`` pan
-      right.
-    * **Click + drag** on a track to zoom into the selected x-range.
-    * **Double-click** anywhere on the figure to reset the zoom.
-    * **Hover** to show a thin crosshair and a position readout. The
-      crosshair is *debounced* — it hides while the mouse is moving and
-      re-appears at the current position once the cursor has been
-      motionless for ``hover_debounce_ms`` ms (default 120). This avoids
-      the WebSocket trying to track a fast-moving cursor in real time.
-
-      Set ``hover_debounce_ms=0`` to switch to continuous tracking, in
-      which case ``hover_hz`` (default 60) caps the update rate.
-
-    Return type
-    -----------
-    Under the widget backend with ``ipywidgets`` installed, returns an
-    ``ipywidgets.VBox`` containing the toolbar + canvas — display it directly.
-    Otherwise returns ``(fig, ax)`` so the static-backend path keeps working.
-    """
-    backend = mpl.get_backend().lower()
-    is_widget = "ipympl" in backend or "widget" in backend or "nbagg" in backend
-
-    # In widget mode, suppress matplotlib's auto-display so the figure only
-    # appears inside our composed VBox.
-    if is_widget and show_toolbar:
-        plt.ioff()
-    try:
-        fig, ax = coverage_track(
-            values, positions, genes=genes, dpi=dpi, figsize=figsize, **kwargs
-        )
-    finally:
-        if is_widget and show_toolbar:
-            plt.ion()
-
-    # ipympl-specific chrome trimming so the widget fits in a notebook column.
-    # These attributes only exist on the widget backend; ignore otherwise.
-    canvas = fig.canvas
-    for attr in ("header_visible", "footer_visible"):
-        if hasattr(canvas, attr):
-            try:
-                setattr(canvas, attr, False)
-            except Exception:
-                pass
-    if hasattr(canvas, "layout"):
-        try:
-            canvas.layout.width = "100%"
-            canvas.layout.max_width = f"{int(figsize[0] * dpi)}px"
-        except Exception:
-            pass
-    if hasattr(canvas, "capture_scroll"):
-        try:
-            canvas.capture_scroll = True
-        except Exception:
-            pass
-    tracked_axes = list(fig.axes)
-    original_xlim = ax.get_xlim()
-
-    crosshairs = [
-        a.axvline(
-            x=original_xlim[0],
-            color=crosshair_color,
-            linewidth=0.7,
-            alpha=0.0,
-            zorder=10,
-        )
-        for a in tracked_axes
-    ]
-    cursor_text = ax.text(
-        0.005,
-        0.97,
-        "",
-        color=crosshair_color,
-        fontsize=8,
-        ha="left",
-        va="top",
-        transform=ax.transAxes,
-        zorder=11,
-    )
-
-    # Hover behavior:
-    #   - debounce mode (hover_debounce_ms > 0): hide the crosshair on any
-    #     motion, then re-show at the current cursor position once the
-    #     mouse has been motionless for `hover_debounce_ms` ms. Cheap and
-    #     avoids the WebSocket trying to keep up with fast motion.
-    #   - throttle mode (hover_debounce_ms == 0): continuous tracking,
-    #     capped at `hover_hz` updates per second.
-    import time
-
-    _hover_state: dict = {"visible": False, "pending_x": None, "pending_in": False}
-
-    def _hide_crosshair_now() -> None:
-        for line in crosshairs:
-            line.set_alpha(0.0)
-        cursor_text.set_text("")
-        _hover_state["visible"] = False
-        fig.canvas.draw_idle()
-
-    def _show_crosshair_at_pending() -> None:
-        if _hover_state["pending_in"] and _hover_state["pending_x"] is not None:
-            x = _hover_state["pending_x"]
-            for line in crosshairs:
-                line.set_xdata([x, x])
-                line.set_alpha(0.7)
-            cursor_text.set_text(f"x = {x:.0f}")
-            _hover_state["visible"] = True
-        else:
-            for line in crosshairs:
-                line.set_alpha(0.0)
-            cursor_text.set_text("")
-            _hover_state["visible"] = False
-        fig.canvas.draw_idle()
-
-    if hover_debounce_ms > 0:
-        debounce_timer = fig.canvas.new_timer(interval=hover_debounce_ms)
-        debounce_timer.single_shot = True
-        debounce_timer.add_callback(_show_crosshair_at_pending)
-
-        def _on_move(event):
-            in_axes = event.inaxes in tracked_axes and event.xdata is not None
-            _hover_state["pending_in"] = in_axes
-            _hover_state["pending_x"] = event.xdata if in_axes else None
-            # Hide the (now-stale) crosshair immediately on the first move
-            # of a fresh motion burst; subsequent moves are no-ops.
-            if _hover_state["visible"]:
-                _hide_crosshair_now()
-            debounce_timer.stop()
-            debounce_timer.start()
-    else:
-        _move_period = 1.0 / max(1.0, float(hover_hz))
-        _last_move = {"t": 0.0, "x": None}
-
-        def _on_move(event):
-            now = time.monotonic()
-            if now - _last_move["t"] < _move_period:
-                return
-            if event.inaxes in tracked_axes and event.xdata is not None:
-                x = event.xdata
-                if _last_move["x"] == x:
-                    return
-                _last_move["x"] = x
-                for line in crosshairs:
-                    line.set_xdata([x, x])
-                    line.set_alpha(0.7)
-                cursor_text.set_text(f"x = {x:.0f}")
-            else:
-                if _last_move["x"] is None:
-                    return
-                _last_move["x"] = None
-                for line in crosshairs:
-                    line.set_alpha(0.0)
-                cursor_text.set_text("")
-            _last_move["t"] = now
-            fig.canvas.draw_idle()
-
-    def _on_click(event):
-        if event.dblclick and event.inaxes in tracked_axes:
-            ax.set_xlim(original_xlim)
-            fig.canvas.draw_idle()
-
-    def _on_select(xmin, xmax):
-        if xmax - xmin < 1:
-            return
-        ax.set_xlim(xmin, xmax)
-        fig.canvas.draw_idle()
-
-    span = SpanSelector(
-        ax,
-        _on_select,
-        "horizontal",
-        useblit=True,
-        props={"alpha": 0.2, "facecolor": selection_color},
-        interactive=False,
-        minspan=1.0,
-    )
-
-    fig.canvas.mpl_connect("motion_notify_event", _on_move)
-    fig.canvas.mpl_connect("button_press_event", _on_click)
-
-    # Keep references alive so widgets aren't garbage-collected.
-    fig._s2fview_widgets = (span,)  # type: ignore[attr-defined]
-
-    if is_widget and show_toolbar:
-        toolbar = _make_zoom_toolbar(ax, fig, original_xlim)
-        if toolbar is not None:
-            try:
-                import ipywidgets as widgets
-            except ImportError:
-                return fig, ax
-            return widgets.VBox([toolbar, fig.canvas])
-
-    return fig, ax
-
-
-def _make_zoom_toolbar(ax: Axes, fig: Figure, original_xlim: tuple[float, float]):
-    """Return an ipywidgets HBox of pan / zoom / reset buttons, or None."""
-    try:
-        import ipywidgets as widgets
-    except ImportError:
-        return None
-
-    def _set_xlim(x0: float, x1: float) -> None:
-        lo, hi = sorted(original_xlim)
-        x0 = max(lo, x0)
-        x1 = min(hi, x1)
-        if x1 - x0 < 1:
-            return
-        ax.set_xlim(x0, x1)
-        fig.canvas.draw_idle()
-
-    def _zoom(factor: float) -> None:
-        x0, x1 = ax.get_xlim()
-        center = (x0 + x1) / 2
-        new_half = (x1 - x0) / 2 * factor
-        _set_xlim(center - new_half, center + new_half)
-
-    def _pan(direction: float) -> None:
-        x0, x1 = ax.get_xlim()
-        shift = (x1 - x0) * 0.25 * direction
-        # Clamp so we don't pan past the data edges.
-        lo, hi = sorted(original_xlim)
-        if shift < 0:
-            shift = max(shift, lo - x0)
-        else:
-            shift = min(shift, hi - x1)
-        _set_xlim(x0 + shift, x1 + shift)
-
-    def _reset() -> None:
-        ax.set_xlim(original_xlim)
-        fig.canvas.draw_idle()
-
-    btn_layout = widgets.Layout(width="38px", padding="0px")
-    pan_l = widgets.Button(icon="caret-left", tooltip="Pan left", layout=btn_layout)
-    zoom_out = widgets.Button(icon="search-minus", tooltip="Zoom out", layout=btn_layout)
-    reset = widgets.Button(icon="home", tooltip="Reset zoom", layout=btn_layout)
-    zoom_in = widgets.Button(icon="search-plus", tooltip="Zoom in", layout=btn_layout)
-    pan_r = widgets.Button(icon="caret-right", tooltip="Pan right", layout=btn_layout)
-
-    pan_l.on_click(lambda _b: _pan(-1))
-    zoom_out.on_click(lambda _b: _zoom(2.0))
-    reset.on_click(lambda _b: _reset())
-    zoom_in.on_click(lambda _b: _zoom(0.5))
-    pan_r.on_click(lambda _b: _pan(+1))
-
-    return widgets.HBox(
-        [pan_l, zoom_out, reset, zoom_in, pan_r],
-        layout=widgets.Layout(justify_content="center"),
-    )
-
-
-def _exon_polygon(
+def _exon_vertices(
     start: float,
     end: float,
     y0: float,
-    height: float,
+    y1: float,
+    y_mid: float,
     *,
-    arrow_side: Literal["left", "right"] | None = None,
-    arrow_width: float = 0.0,
+    arrow_side: str | None,
+    arrow_width: float,
 ) -> list[tuple[float, float]]:
-    """Vertices for an exon: plain rectangle, or pentagon with a directional tip."""
+    """Polygon vertices for an exon — rectangle, or pentagon with an arrow tip."""
     if not arrow_side or arrow_width <= 0:
-        return [(start, y0), (end, y0), (end, y0 + height), (start, y0 + height)]
+        return [(start, y0), (end, y0), (end, y1), (start, y1), (start, y0)]
     arrow_width = min(arrow_width, end - start)
     if arrow_side == "right":
         body_end = end - arrow_width
         return [
             (start, y0),
             (body_end, y0),
-            (end, y0 + height / 2),
-            (body_end, y0 + height),
-            (start, y0 + height),
+            (end, y_mid),
+            (body_end, y1),
+            (start, y1),
+            (start, y0),
         ]
-    # left
     body_start = start + arrow_width
     return [
         (body_start, y0),
         (end, y0),
-        (end, y0 + height),
-        (body_start, y0 + height),
-        (start, y0 + height / 2),
+        (end, y1),
+        (body_start, y1),
+        (start, y_mid),
+        (body_start, y0),
     ]
 
 

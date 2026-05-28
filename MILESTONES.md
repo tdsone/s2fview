@@ -6,5 +6,6 @@ Walk the list to find the look you want; pull it back with
 
 | Commit | Notes |
 |--------|-------|
-| [`8c46725`](https://github.com/tdsone/s2fview/commit/8c46725) | **"I really like the interactive version"** — interactive viewer with the zoom/pan toolbar, DNA sequence track (lazy letters on zoom), gene annotations with strand colors + arrow tips, all in Inter. |
-| [`40c85e5`](https://github.com/tdsone/s2fview/commit/40c85e5) | **Pivot: Plotly becomes the primary interactive path.** Rendering speed and hover lag are much better in the Plotly viewer (`notebook_plotly.ipynb`), so future interactive work targets `s2fview.plotly_track`. The matplotlib + ipympl path stays for static figures and as a reference, but won't get new features by default. |
+| [`8c46725`](https://github.com/tdsone/s2fview/commit/8c46725) | **"I really like the interactive version"** — historical: the matplotlib + ipympl viewer (now removed) when it had a zoom/pan toolbar, lazy DNA letters, strand-colored gene arrows, and Inter bundled with the package. Recover via `git show 8c46725:src/s2fview/__init__.py` etc. |
+| [`40c85e5`](https://github.com/tdsone/s2fview/commit/40c85e5) | **Pivot to Plotly.** Hover lag and rendering speed were significantly better in the Plotly viewer, so future interactive work targeted `s2fview.plotly_track`. The matplotlib + ipympl, GenomeView, and igv-notebook paths kept as reference. |
+| _post-consolidation_ | **Repo simplified to Plotly only.** Matplotlib, ipympl, GenomeView, and igv-notebook viewers + their notebooks were removed; `s2fview.plotly_track.plotly_coverage_track` was promoted into `s2fview.coverage_track`. Use `git log` from this point forward for the single-implementation history. |
